@@ -93,7 +93,6 @@ enum mixer_source {
 
 static volatile mixer_source source;
 
-static int mixer_callback(uintptr_t handle, uint8_t control_group, uint8_t control_index, float &control);
 static int mixer_mix_threadsafe(float *outputs, volatile uint16_t *limits);
 
 static MixerGroup mixer_group;
@@ -106,7 +105,8 @@ int mixer_mix_threadsafe(float *outputs, volatile uint16_t *limits)
 	}
 
 	in_mixer = true;
-	int mixcount = mixer_group.mix(&outputs[0], PX4IO_SERVO_COUNT);
+	actuator_controls_s controls[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS] {};
+	int mixcount = mixer_group.mix(controls, &outputs[0], PX4IO_SERVO_COUNT);
 	*limits = mixer_group.get_saturation_status();
 	in_mixer = false;
 
@@ -400,115 +400,6 @@ mixer_tick()
 	}
 }
 
-static int
-mixer_callback(uintptr_t handle,
-	       uint8_t control_group,
-	       uint8_t control_index,
-	       float &control)
-{
-	control = 0.0f;
-
-	if (control_group >= PX4IO_CONTROL_GROUPS) {
-		return -1;
-	}
-
-	switch (source) {
-	case MIX_FMU:
-		if (control_index < PX4IO_CONTROL_CHANNELS && control_group < PX4IO_CONTROL_GROUPS) {
-			if (r_page_controls[CONTROL_PAGE_INDEX(control_group, control_index)] == INT16_MAX) {
-				//catch NAN values encoded as INT16 max for disarmed outputs
-				control = NAN;
-
-			} else {
-				control = REG_TO_FLOAT(r_page_controls[CONTROL_PAGE_INDEX(control_group, control_index)]);
-			}
-
-			break;
-		}
-
-		return -1;
-
-	case MIX_OVERRIDE:
-		if (r_page_rc_input[PX4IO_P_RC_VALID] & (1 << CONTROL_PAGE_INDEX(control_group, control_index))) {
-			control = REG_TO_FLOAT(r_page_rc_input[PX4IO_P_RC_BASE + control_index]);
-			break;
-		}
-
-		return -1;
-
-	case MIX_OVERRIDE_FMU_OK:
-
-		/* FMU is ok but we are in override mode, use direct rc control for the available rc channels. The remaining channels are still controlled by the fmu */
-		if (r_page_rc_input[PX4IO_P_RC_VALID] & (1 << CONTROL_PAGE_INDEX(control_group, control_index))) {
-			control = REG_TO_FLOAT(r_page_rc_input[PX4IO_P_RC_BASE + control_index]);
-			break;
-
-		} else if (control_index < PX4IO_CONTROL_CHANNELS && control_group < PX4IO_CONTROL_GROUPS) {
-			control = REG_TO_FLOAT(r_page_controls[CONTROL_PAGE_INDEX(control_group, control_index)]);
-			break;
-		}
-
-		return -1;
-
-	case MIX_DISARMED:
-	case MIX_FAILSAFE:
-	case MIX_NONE:
-		control = 0.0f;
-		return -1;
-	}
-
-	/* apply trim offsets for override channels */
-	if (source == MIX_OVERRIDE || source == MIX_OVERRIDE_FMU_OK) {
-		if (control_group == actuator_controls_s::GROUP_INDEX_ATTITUDE &&
-		    control_index == actuator_controls_s::INDEX_ROLL) {
-			control *= REG_TO_FLOAT(r_setup_scale_roll);
-			control += REG_TO_FLOAT(r_setup_trim_roll);
-
-		} else if (control_group == actuator_controls_s::GROUP_INDEX_ATTITUDE &&
-			   control_index == actuator_controls_s::INDEX_PITCH) {
-			control *= REG_TO_FLOAT(r_setup_scale_pitch);
-			control += REG_TO_FLOAT(r_setup_trim_pitch);
-
-		} else if (control_group == actuator_controls_s::GROUP_INDEX_ATTITUDE &&
-			   control_index == actuator_controls_s::INDEX_YAW) {
-			control *= REG_TO_FLOAT(r_setup_scale_yaw);
-			control += REG_TO_FLOAT(r_setup_trim_yaw);
-		}
-	}
-
-	/* limit output */
-	if (control > 1.0f) {
-		control = 1.0f;
-
-	} else if (control < -1.0f) {
-		control = -1.0f;
-	}
-
-	/* motor spinup phase - lock throttle to zero */
-	if ((pwm_limit.state == OUTPUT_LIMIT_STATE_RAMP) || (should_arm_nothrottle && !should_arm)) {
-		if ((control_group == actuator_controls_s::GROUP_INDEX_ATTITUDE ||
-		     control_group == actuator_controls_s::GROUP_INDEX_ATTITUDE_ALTERNATE) &&
-		    control_index == actuator_controls_s::INDEX_THROTTLE) {
-			/* limit the throttle output to zero during motor spinup,
-			 * as the motors cannot follow any demand yet
-			 */
-			control = 0.0f;
-		}
-	}
-
-	/* only safety off, but not armed - set throttle as invalid */
-	if (should_arm_nothrottle && !should_arm) {
-		if ((control_group == actuator_controls_s::GROUP_INDEX_ATTITUDE ||
-		     control_group == actuator_controls_s::GROUP_INDEX_ATTITUDE_ALTERNATE) &&
-		    control_index == actuator_controls_s::INDEX_THROTTLE) {
-			/* mark the throttle as invalid */
-			control = NAN;
-		}
-	}
-
-	return 0;
-}
-
 /*
  * XXX error handling here should be more aggressive; currently it is
  * possible to get STATUS_FLAGS_MIXER_OK set even though the mixer has
@@ -540,7 +431,7 @@ mixer_handle_text_create_mixer()
 
 	/* process the text buffer, adding new mixers as their descriptions can be parsed */
 	unsigned resid = mixer_text_length;
-	mixer_group.load_from_buf(mixer_callback, 0, &mixer_text[0], resid);
+	mixer_group.load_from_buf(&mixer_text[0], resid);
 
 	/* if anything was parsed */
 	if (resid != mixer_text_length) {

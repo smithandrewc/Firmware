@@ -174,7 +174,7 @@ private:
 	unsigned				_rc_min_value;
 	unsigned				_rc_max_value;
 	param_t					_param_indicate_esc;
-	actuator_controls_s 	_controls;
+	actuator_controls_s 	_controls[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS] {};
 	MotorData_t 			Motor[MAX_MOTORS];
 
 	static int				task_main_trampoline(int argc, char *argv[]);
@@ -538,13 +538,13 @@ MK::task_main()
 			if (changed) {
 
 				/* get controls - must always do this to avoid spinning */
-				orb_copy(ORB_ID_VEHICLE_ATTITUDE_CONTROLS, _t_actuators, &_controls);
+				orb_copy(ORB_ID_VEHICLE_ATTITUDE_CONTROLS, _t_actuators, &_controls[0]);
 
 				/* can we mix? */
 				if (_mixers != nullptr) {
 
 					/* do mixing */
-					outputs.noutputs = _mixers->mix(&outputs.output[0], _num_outputs);
+					outputs.noutputs = _mixers->mix(_controls, &outputs.output[0], _num_outputs);
 					outputs.timestamp = hrt_absolute_time();
 
 					/* iterate actuators */
@@ -943,19 +943,6 @@ MK::mk_servo_locate()
 	return ret;
 }
 
-
-int
-MK::control_callback(uintptr_t handle,
-		     uint8_t control_group,
-		     uint8_t control_index,
-		     float &input)
-{
-	const actuator_controls_s *controls = (actuator_controls_s *)handle;
-
-	input = controls->control[control_index];
-	return 0;
-}
-
 int
 MK::ioctl(file *filp, int cmd, unsigned long arg)
 {
@@ -1054,7 +1041,7 @@ MK::pwm_ioctl(file *filp, int cmd, unsigned long arg)
 
 			} else {
 
-				ret = _mixers->load_from_buf(control_callback, (uintptr_t)&_controls, buf, buflen);
+				ret = _mixers->load_from_buf(buf, buflen);
 
 				if (ret != 0) {
 					DEVICE_DEBUG("mixer load failed with %d", ret);

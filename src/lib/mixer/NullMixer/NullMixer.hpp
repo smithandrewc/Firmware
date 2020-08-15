@@ -43,7 +43,7 @@
 class NullMixer : public Mixer
 {
 public:
-	NullMixer() : Mixer(nullptr, 0) {}
+	NullMixer() = default;
 	virtual ~NullMixer() = default;
 
 	// no copy, assignment, move, move assignment
@@ -67,7 +67,8 @@ public:
 	 */
 	static NullMixer		*from_text(const char *buf, unsigned &buflen);
 
-	unsigned			mix(float *outputs, unsigned space) override;
+	unsigned			mix(actuator_controls_s controls[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS], float *outputs,
+					    unsigned space) override;
 
 	unsigned			set_trim(float trim) override { return 1; }
 	unsigned			get_trim(float *trim) override { return 1; }
