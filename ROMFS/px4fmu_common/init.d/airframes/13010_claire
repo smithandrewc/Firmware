@@ -36,7 +36,7 @@ fi
 
 set MAV_TYPE 21
 
-set MIXER claire
+set MIXER quad_x
 set MIXER_AUX claire
 
 set PWM_OUT 1234
