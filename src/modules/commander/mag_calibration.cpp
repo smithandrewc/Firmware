@@ -312,11 +312,12 @@ static calibrate_return mag_calibration_worker(detect_orientation_return orienta
 			Vector3f new_samples[MAX_MAGS] {};
 
 			for (uint8_t cur_mag = 0; cur_mag < MAX_MAGS; cur_mag++) {
-				sensor_mag_s mag;
-
 				if (worker_data->calibration[cur_mag].device_id() != 0) {
-					if (mag_sub[cur_mag].update(&mag)) {
+					sensor_mag_s mag;
+					Vector3f sample{0.f, 0.f, 0.f};
+					int sample_count = 0;
 
+					while (mag_sub[cur_mag].update(&mag)) {
 						if (worker_data->append_to_existing_calibration) {
 							// keep and update the existing calibration when we are not doing a full 6-axis calibration
 							const Matrix3f &scale = worker_data->calibration[cur_mag].scale();
@@ -329,8 +330,14 @@ static calibrate_return mag_calibration_worker(detect_orientation_return orienta
 							mag.z = m(2);
 						}
 
+						sample += Vector3f{mag.x, mag.y, mag.z};
+						sample_count++;
+					}
+
+					if (sample_count > 0) {
 						// Check if this measurement is good to go in
-						bool reject = reject_sample(mag.x, mag.y, mag.z,
+						const Vector3f sample_avg = sample / sample_count;
+						bool reject = reject_sample(sample_avg(0), sample_avg(1), sample_avg(2),
 									    worker_data->x[cur_mag], worker_data->y[cur_mag], worker_data->z[cur_mag],
 									    worker_data->calibration_counter_total[cur_mag],
 									    worker_data->calibration_sides * worker_data->calibration_points_perside);
@@ -339,7 +346,7 @@ static calibrate_return mag_calibration_worker(detect_orientation_return orienta
 							rejected = true;
 
 						} else {
-							new_samples[cur_mag] = Vector3f{mag.x, mag.y, mag.z};
+							new_samples[cur_mag] = sample_avg;
 						}
 
 					} else {
@@ -522,6 +529,7 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub, int32_t cal_ma
 				// enough to reliably estimate both scales and offsets with 2 sides only (even if the existing calibration
 				// is already close)
 				bool sphere_fit_only = worker_data.calibration_sides <= 2;
+				bool sphere_fit_success = false;
 				{
 					float fitness = 1.0e30f;
 					float sphere_lambda = 1.0f;
@@ -535,6 +543,16 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub, int32_t cal_ma
 									    &diag[cur_mag](0), &diag[cur_mag](1), &diag[cur_mag](2),
 									    &offdiag[cur_mag](0), &offdiag[cur_mag](1), &offdiag[cur_mag](2));
 
+						if (ret == PX4_OK) {
+							sphere_fit_success = true;
+
+						} else {
+							// stop here if fit has previously succeeded
+							if (sphere_fit_success) {
+								break;
+							}
+						}
+
 						PX4_DEBUG("Mag: %d (%d/%d) sphere fit ret=%d, fitness: %.5f, lambda: %.5f, radius: %.3f, offset: [%.3f, %.3f %.3f]",
 							  cur_mag, i, max_iterations, ret, (double)fitness, (double)sphere_lambda, (double)sphere_radius[cur_mag],
 							  (double)sphere[cur_mag](0), (double)sphere[cur_mag](1), (double)sphere[cur_mag](2));
@@ -542,6 +560,8 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub, int32_t cal_ma
 
 					PX4_INFO("Mag: %d sphere fitness: %.5f radius: %.4f", cur_mag, (double)fitness, (double)sphere_radius[cur_mag]);
 				}
+
+				bool ellipsoid_fit_success = false;
 
 				if (!sphere_fit_only) {
 					float fitness = 1.0e30f;
@@ -556,12 +576,28 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub, int32_t cal_ma
 									       &diag[cur_mag](0), &diag[cur_mag](1), &diag[cur_mag](2),
 									       &offdiag[cur_mag](0), &offdiag[cur_mag](1), &offdiag[cur_mag](2));
 
+						if (ret == PX4_OK) {
+							ellipsoid_fit_success = true;
+
+						} else {
+							// stop here if fit has previously succeeded
+							if (ellipsoid_fit_success) {
+								break;
+							}
+						}
+
 						PX4_DEBUG("Mag: %d (%d/%d) ellipsoid fit ret=%d, fitness: %.5f, lambda: %.5f, radius: %.3f, offset: [%.3f, %.3f %.3f]",
 							  cur_mag, i, max_iterations, ret, (double)fitness, (double)ellipsoid_lambda, (double)sphere_radius[cur_mag],
 							  (double)sphere[cur_mag](0), (double)sphere[cur_mag](1), (double)sphere[cur_mag](2));
 					}
 
 					PX4_INFO("Mag: %d ellipsoid fitness: %.5f", cur_mag, (double)fitness);
+				}
+
+				if (!sphere_fit_success && !ellipsoid_fit_success) {
+					calibration_log_emergency(mavlink_log_pub, "Retry calibration (unable to fit mag #%u)", cur_mag);
+					result = calibrate_return_error;
+					break;
 				}
 
 				result = check_calibration_result(sphere[cur_mag](0), sphere[cur_mag](1), sphere[cur_mag](2),
@@ -577,54 +613,47 @@ calibrate_return mag_calibrate_all(orb_advert_t *mavlink_log_pub, int32_t cal_ma
 		}
 	}
 
-	// Print uncalibrated data points
-	if (result == calibrate_return_ok) {
 
-		// DO NOT REMOVE! Critical validation data!
 #if 0
-		printf("RAW DATA:\n--------------------\n");
 
+	// DO NOT REMOVE! Critical validation data!
+	if (result == calibrate_return_ok) {
+		// Print uncalibrated data points
 		for (uint8_t cur_mag = 0; cur_mag < MAX_MAGS; cur_mag++) {
-
 			if (worker_data.calibration_counter_total[cur_mag] == 0) {
 				continue;
 			}
 
-			printf("RAW: MAG %u with %u samples:\n", cur_mag, worker_data.calibration_counter_total[cur_mag]);
+			printf("MAG %u with %u samples:\n", cur_mag, worker_data.calibration_counter_total[cur_mag]);
+			printf("RAW -> CALIBRATED\n");
+
+			float scale_data[9] {
+				diag[cur_mag](0),    offdiag[cur_mag](0), offdiag[cur_mag](1),
+				offdiag[cur_mag](0),    diag[cur_mag](1), offdiag[cur_mag](2),
+				offdiag[cur_mag](1), offdiag[cur_mag](2),    diag[cur_mag](2)
+			};
+
+			const Matrix3f scale{scale_data};
+			const Vector3f &offset = sphere[cur_mag];
 
 			for (size_t i = 0; i < worker_data.calibration_counter_total[cur_mag]; i++) {
 				float x = worker_data.x[cur_mag][i];
 				float y = worker_data.y[cur_mag][i];
 				float z = worker_data.z[cur_mag][i];
-				printf("%8.4f, %8.4f, %8.4f\n", (double)x, (double)y, (double)z);
-			}
 
-			printf(">>>>>>>\n");
-		}
+				// apply calibration
+				const Vector3f cal{scale *(Vector3f{x, y, z} - offset)};
 
-		printf("CALIBRATED DATA:\n--------------------\n");
-
-		for (uint8_t cur_mag = 0; cur_mag < MAX_MAGS; cur_mag++) {
-
-			if (worker_data.calibration_counter_total[cur_mag] == 0) {
-				continue;
-			}
-
-			printf("Calibrated: MAG %u with %u samples:\n", cur_mag, worker_data.calibration_counter_total[cur_mag]);
-
-			for (size_t i = 0; i < worker_data.calibration_counter_total[cur_mag]; i++) {
-				float x = worker_data.x[cur_mag][i] - sphere[cur_mag](0);
-				float y = worker_data.y[cur_mag][i] - sphere[cur_mag](1);
-				float z = worker_data.z[cur_mag][i] - sphere[cur_mag](2);
-				printf("%8.4f, %8.4f, %8.4f\n", (double)x, (double)y, (double)z);
+				printf("[%.3f, %.3f, %.3f] -> [%.3f, %.3f, %.3f]\n",
+				       (double)x, (double)y, (double)z,
+				       (double)cal(0), (double)cal(1), (double)cal(2));
 			}
 
 			printf("SPHERE RADIUS: %8.4f\n", (double)sphere_radius[cur_mag]);
-			printf(">>>>>>>\n");
 		}
+	}
 
 #endif // DO NOT REMOVE! Critical validation data!
-	}
 
 
 	// Attempt to automatically determine external mag rotations
