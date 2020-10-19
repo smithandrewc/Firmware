@@ -90,9 +90,6 @@ set(msg_files
 	offboard_control_mode.msg
 	onboard_computer_status.msg
 	optical_flow.msg
-	orb_test.msg
-	orb_test_large.msg
-	orb_test_medium.msg
 	orbit_status.msg
 	parameter_update.msg
 	ping.msg
@@ -172,6 +169,14 @@ set(msg_files
 	wind_estimate.msg
 	yaw_estimator_status.msg
 )
+
+if(PX4_TESTING)
+	list(APPEND msg_files
+		orb_test.msg
+		orb_test_large.msg
+		orb_test_medium.msg
+	)
+endif()
 
 set(deprecated_msgs
 	ekf2_innovations.msg	# 2019-11-22, Updated estimator interface and logging; replaced by 'estimator_innovations'.
